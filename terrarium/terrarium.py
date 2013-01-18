@@ -445,6 +445,30 @@ def adjust_options(options, args):
 
 REQUIREMENTS = %(REQUIREMENTS)s
 
+# Redefining relative path creation to handle symlinks correctly.
+def make_relative_path(source, dest, dest_is_directory=True):
+    source = os.path.dirname(source)
+    if not dest_is_directory:
+        dest_filename = os.path.basename(dest)
+        dest = os.path.dirname(dest)
+
+    # Resolve symlinks using realpath().
+    dest = os.path.realpath(dest)
+    source = os.path.realpath(source)
+
+    dest_parts = dest.strip(os.path.sep).split(os.path.sep)
+    source_parts = source.strip(os.path.sep).split(os.path.sep)
+    while dest_parts and source_parts and dest_parts[0] == source_parts[0]:
+        dest_parts.pop(0)
+        source_parts.pop(0)
+    full_parts = ['..']*len(source_parts) + dest_parts
+    if not dest_is_directory:
+        full_parts.append(dest_filename)
+    if not full_parts:
+        # Special case for the current directory (otherwise it'd be '')
+        return './'
+    return os.path.sep.join(full_parts)
+
 def after_install(options, base):
     # Debug logging for virtualenv
     logger.consumers = [(%(VENV_LOGGING)s, sys.stdout)]
