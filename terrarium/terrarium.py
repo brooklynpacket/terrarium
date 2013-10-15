@@ -440,7 +440,7 @@ class Terrarium(object):
 
 TERRARIUM_BOOTSTRAP_EXTRA_TEXT = '''
 def adjust_options(options, args):
-    options.use_distribute = True
+    options.use_setuptools = True
     options.system_site_packages = False
 
 REQUIREMENTS = %(REQUIREMENTS)s
