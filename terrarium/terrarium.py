@@ -12,7 +12,7 @@ import logging
 from logging import getLogger, StreamHandler
 
 # Update here and in setup.py
-VERSION = '1.0.0rc3-dev'
+VERSION = '1.0.0rc5-dev'
 
 try:
     import boto  # noqa
@@ -36,6 +36,38 @@ MAGIC_NUM = {
     'BZIP': ('\x42\x5a', 0),
     'TAR': ('ustar', 257),
 }
+
+
+class Namespace(argparse._AttributeHolder):
+    def __init__(self):
+        super(Namespace, self).__init__()
+        self._sensitive_arguments = set()
+
+    def _get_kwargs(self):
+        '''
+        Exclude arguments which are defined as being sensitive
+        '''
+        kwargs = super(Namespace, self)._get_kwargs()
+        return [
+            (name, value) for name, value in kwargs
+            if name not in self.sensitive_arguments
+        ]
+
+    @property
+    def sensitive_arguments(self):
+        return self._sensitive_arguments
+
+    def add_sensitive_arguments(self, *args):
+        '''
+        Define arguments as being "sensitive." That is, when this object is
+        converted to text, these attributes are not included.
+
+        `args` is a list of strings that indicate the attribute name.
+        '''
+        self._sensitive_arguments |= set(args)
+
+
+argparse.Namespace = Namespace
 
 
 def rmtree(path):
@@ -72,7 +104,6 @@ class Terrarium(object):
         self.args = args
         self._requirements = None
         self._digest = None
-        logger.debug('Terrarium created with %s', args)
 
     @property
     def digest(self):
@@ -98,19 +129,49 @@ class Terrarium(object):
         self._requirements = sorted(lines)
         return self._requirements
 
+    def restore_previously_backed_up_environment(self):
+        backup = self.get_backup_location()
+        if not self.environment_exists(backup):
+            logger.info(
+                'Failed to restore backup. It doesn\'t appear to exist at %s',
+                backup,
+            )
+            return 1
+
+        target = self.get_target_location()
+        if os.path.isdir(target):
+            logger.info('Deleting environment at %s', target)
+            rmtree(target)
+
+        logger.info('Renaming %s to %s', backup, target)
+        os.rename(backup, target)
+        return 0
+
+    def get_target_location(self):
+        return os.path.abspath(self.args.target)
+
+    def get_backup_location(self, target=None):
+        if target is None:
+            target = self.get_target_location()
+        return ''.join([target, self.args.backup_suffix])
+
+    def environment_exists(self, env):
+        return os.path.exists(os.path.join(
+            env,
+            'bin',
+            'activate',
+        ))
+
     def install(self):
         logger.debug('Running install')
 
-        old_target = os.path.abspath(self.args.target)
+        old_target = self.get_target_location()
+        old_target_backup = self.get_backup_location()
         new_target = old_target
         prompt = os.path.basename(new_target)
 
         # Are we building a new environment, or replacing an existing one?
-        old_target_exists = os.path.exists(os.path.join(
-            old_target,
-            'bin',
-            'activate',
-        ))
+        old_target_exists = self.environment_exists(old_target)
         if old_target_exists:
             new_target = tempfile.mkdtemp(
                 prefix='%s.' % os.path.basename(old_target),
@@ -123,6 +184,13 @@ class Terrarium(object):
             downloaded = self.download(new_target)
 
         if not downloaded:
+            if self.args.require_download:
+                logger.error(
+                    'Failed to download bundle and download is '
+                    'required. Refusing to build a new bundle.'
+                )
+                return 1
+
             # Create a self-contained script to create a virtual environment
             # and install all of the requested requirements
             logger.info('Building new environment')
@@ -155,7 +223,6 @@ class Terrarium(object):
             if self.args.upload:
                 self.upload(new_target)
 
-        old_target_backup = '%s%s' % (old_target, self.args.backup_suffix)
         if old_target_exists:
             logger.info('Moving old environment out of the way')
             if os.path.exists(old_target_backup):
@@ -319,7 +386,7 @@ class Terrarium(object):
                 self.args.s3_bucket,
                 policy='public-read',
             )
-        except boto.exception.S3CreateError:
+        except (boto.exception.S3CreateError, boto.exception.S3ResponseError):
             pass
         return boto.s3.bucket.Bucket(conn, name=self.args.s3_bucket)
 
@@ -505,7 +572,12 @@ def after_install(options, base):
         pip.version_control()
 
     # Run pip install
-    c = InstallCommand()
+    try:
+        c = InstallCommand()
+    except TypeError:
+        from pip.baseparser import create_main_parser
+        main_parser = create_main_parser()
+        c = InstallCommand(main_parser)
     reqs = shlex.split(' '.join(REQUIREMENTS))
     options, args = c.parser.parse_args(reqs)
     options.require_venv = True
@@ -517,6 +589,10 @@ def after_install(options, base):
 
 
 def parse_args():
+    sensitive_arguments = [
+        's3_access_key',
+        's3_secret_key',
+    ]
     ap = argparse.ArgumentParser()
     ap.add_argument(
         '-V', '--version',
@@ -573,6 +649,15 @@ def parse_args():
             attempt to download an existing terrarium bundle instead of
             building a new one. Using --no-download forces terrarium to build a
             new environment.
+        ''',
+    )
+    ap.add_argument(
+        '--require-download',
+        default=False,
+        action='store_true',
+        help='''
+            If we fail to download a terrarium bundle from the storage
+            location, do not proceed to build one.
         ''',
     )
     ap.add_argument(
@@ -698,17 +783,17 @@ def parse_args():
             'key',
             help='Display remote key for current requirement set and platform',
         ),
-        'exists': subparsers.add_parser(
-            'exists',
-            help='''
-                Return exit code 0 if environment matches requirement set
-            ''',
-        ),
         'install': subparsers.add_parser(
             'install',
             help='''
                 Replace current environment with the one given by the
                 requirement set.
+            ''',
+        ),
+        'revert': subparsers.add_parser(
+            'revert',
+            help='''
+                Restore the most recent backed-up virtualenv, if it exists.
             ''',
         ),
     }
@@ -717,6 +802,7 @@ def parse_args():
         command.add_argument('reqs', nargs=argparse.REMAINDER)
 
     args = ap.parse_args()
+    args.add_sensitive_arguments(*sensitive_arguments)
 
     if not boto and args.s3_bucket is not None:
         ap.error(
@@ -726,7 +812,6 @@ def parse_args():
 
     return args
 
-
 def main():
     args = parse_args()
 
@@ -734,21 +819,21 @@ def main():
     logger.setLevel(log_level)
     logger.addHandler(StreamHandler())
 
+    logger.debug('Initialized with %s', args)
+
     terrarium = Terrarium(args)
 
+    r = 0
     if args.command == 'hash':
         sys.stdout.write('%s\n' % terrarium.digest)
     if args.command == 'key':
         key = terrarium.make_remote_key()
         sys.stdout.write('%s\n' % key)
-    elif args.command == 'check':
-        if terrarium.is_clean():
-            sys.exit(0)
-        else:
-            sys.exit(1)
     elif args.command == 'install':
         r = terrarium.install()
-        sys.exit(r)
+    elif args.command == 'revert':
+        r = terrarium.restore_previously_backed_up_environment()
+    sys.exit(r)
 
 if __name__ == '__main__':
     main()

@@ -123,8 +123,18 @@ class TerrariumTester(unittest.TestCase):
         )
         return output, return_code
 
-    def _terrarium(self, command='', call_using_python=False):
-        command = '%s %s %s' % (self.terrarium, self.opts, command)
+    def _terrarium(self, command='', call_using_python=False, **kwargs):
+        options = []
+        for key, value in kwargs.items():
+            options.append('--%s' % key.replace('_', '-'))
+            if value is not None and value is not True:
+                options.append(value)
+        command = ' '.join([
+            self.terrarium,
+            ' '.join(options),
+            self.opts,
+            command,
+        ])
         if call_using_python:
             output, return_code = self._python(command)
         else:
@@ -134,19 +144,14 @@ class TerrariumTester(unittest.TestCase):
         return output, return_code
 
     def _install(self, call_using_python=False, **kwargs):
-        command = '-t %s install %s' % (
-            self.target,
+        command = 'install %s' % (
             self.requirements,
         )
-        options = []
-        for key, value in kwargs.items():
-            options.append('--%s' % key.replace('_', '-'))
-            if value is not None and value is not True:
-                options.append(value)
-        command = '%s %s' % (' '.join(options), command)
         output, return_code = self._terrarium(
             command,
+            target=self.target,
             call_using_python=call_using_python,
+            **kwargs
         )
         return output, return_code
 
@@ -282,10 +287,11 @@ class TestTerrarium(TerrariumTester):
         self.assertInstall()
         self.assertExists('%s.bak' % self.target)
 
-    def test_install_replace_backup_removed(self):
+    def test_install_no_backup(self):
         # Verify that --no-backup deletes the backup when replacing an existing
         # environment
         self.assertInstall()
+        self.assertInstall(no_backup=True)
         self.assertNotExists('%s.bak' % self.target)
 
     def test_install_replace_old_backup_removed(self):
@@ -506,3 +512,65 @@ class TestTerrarium(TerrariumTester):
             'which does not appear to be the case'
             in output[1]
         )
+
+    def test_sensitive_arguments_are_sensitive(self):
+        command = 'hash %s' % (
+            self.requirements,
+        )
+        output, return_code = self._terrarium(
+            command,
+            verbose=True,
+            s3_secret_key='should_not_appear',
+            s3_access_key='do_not_show_me',
+        )
+        self.assertEqual(return_code, 0)
+        self.assertTrue(
+            output[1].startswith('Initialized with Namespace')
+        )
+        self.assertTrue(
+            'should_not_appear' not in output[1]
+        )
+
+        self.assertTrue(
+            'do_not_show_me' not in output[1]
+        )
+
+    def test_restore_previously_backed_up_environment(self):
+        output, return_code = self._terrarium(
+            'revert',
+            target=self.target,
+        )
+        self.assertEqual(return_code, 1)
+
+        self._add_test_requirement()
+        self.assertInstall()
+        with open(os.path.join(self.target, 'foo'), 'w') as f:
+            f.write('bar')
+        self.assertInstall()
+        with open(os.path.join(self.target, 'moo'), 'w') as f:
+            f.write('cow')
+        self.assertExists('%s.bak' % self.target)
+        output, return_code = self._terrarium(
+            'revert',
+            target=self.target,
+        )
+        self.assertEqual(return_code, 0)
+        self.assertNotExists('%s.bak' % self.target)
+        self.assertExists(os.path.join(self.target, 'foo'))
+        self.assertNotExists(os.path.join(self.target, 'moo'))
+
+    def test_require_download(self):
+        self._add_test_requirement()
+
+        output = self.assertInstall(
+            return_code=1,
+            storage_dir=self.storage_dir,
+            require_download=True,
+        )
+        self.assertEqual(
+            output[1],
+            'Download archive failed\n'
+            'Failed to download bundle and download is required. '
+            'Refusing to build a new bundle.\n',
+        )
+        self.assertNotExists(self.python)
