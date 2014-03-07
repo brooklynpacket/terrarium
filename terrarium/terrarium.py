@@ -172,6 +172,12 @@ class Terrarium(object):
 
         # Are we building a new environment, or replacing an existing one?
         old_target_exists = self.environment_exists(old_target)
+
+        print self.args.replace
+        if old_target_exists and not self.args.replace:
+            logger.info('Virtual environment exists, skipping installation...')
+            return 0
+
         if old_target_exists:
             new_target = tempfile.mkdtemp(
                 prefix='%s.' % os.path.basename(old_target),
@@ -649,6 +655,16 @@ def parse_args():
             attempt to download an existing terrarium bundle instead of
             building a new one. Using --no-download forces terrarium to build a
             new environment.
+        ''',
+    )
+    ap.add_argument(
+        '--no-replace',
+        default=True,
+        action='store_false',
+        dest='replace',
+        help='''
+            Do nothing if a virtual environment already exists at the
+            specified location
         ''',
     )
     ap.add_argument(
