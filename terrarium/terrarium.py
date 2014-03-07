@@ -179,7 +179,7 @@ class Terrarium(object):
                 '-c',
                 'source {}/bin/activate && pip install -r {}'.format(old_target, ' '.join(self.args.reqs))
             ]
-            call_subprocess(args)
+            # call_subprocess(args)
             logger.info('Virtual environment exists, re-installing requirements...')
             return 0
 
