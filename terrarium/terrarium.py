@@ -173,9 +173,14 @@ class Terrarium(object):
         # Are we building a new environment, or replacing an existing one?
         old_target_exists = self.environment_exists(old_target)
 
-        print self.args.replace
         if old_target_exists and not self.args.replace:
-            logger.info('Virtual environment exists, skipping installation...')
+            args = [
+                'bash',
+                '-c',
+                'source {}/bin/activate && pip install -r {}'.format(old_target, ' '.join(self.args.reqs))
+            ]
+            call_subprocess(args)
+            logger.info('Virtual environment exists, re-installing requirements...')
             return 0
 
         if old_target_exists:
@@ -663,8 +668,8 @@ def parse_args():
         action='store_false',
         dest='replace',
         help='''
-            Do nothing if a virtual environment already exists at the
-            specified location
+            If the target virtual environment exists, reinstall requirements
+            using the same virtual environment
         ''',
     )
     ap.add_argument(
