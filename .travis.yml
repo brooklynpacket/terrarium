@@ -1,23 +1,15 @@
 language: python
-python:
-    - "2.5"
-    - "2.6"
-    - "2.7"
+install: pip install tox
 env:
-    - TRAVIS_VIRTUALENV_VERSION=1.7.1.2
-    - TRAVIS_VIRTUALENV_VERSION=1.7.2
-    - TRAVIS_VIRTUALENV_VERSION=1.8.2
-    - TRAVIS_VIRTUALENV_VERSION=1.8.3
-    - TRAVIS_VIRTUALENV_VERSION=1.8.4
-    - TRAVIS_VIRTUALENV_VERSION=1.9.1
-script: nosetests -v
-matrix:
-    exclude:
-      - python: "2.5"
-        env: TRAVIS_VIRTUALENV_VERSION=1.9.1
-install:
-    - pip install -q virtualenv==$TRAVIS_VIRTUALENV_VERSION --use-mirrors
-    - python setup.py -q install
+  - TOX_ENV=docs
+  - TOX_ENV=pep8
+  - TOX_ENV=py26-venv-1.7.2
+  - TOX_ENV=py26-venv-1.8.4
+  - TOX_ENV=py26-venv-1.9.1
+  - TOX_ENV=py27-venv-1.7.2
+  - TOX_ENV=py27-venv-1.8.4
+  - TOX_ENV=py27-venv-1.9.1
+script: tox -e $TOX_ENV
 notifications:
   email:
     - kyle.gibson@frozenonline.com
