@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-from __future__ import with_statement
+from __future__ import absolute_import
 
 import argparse
 import hashlib
@@ -11,8 +11,7 @@ import logging
 
 from logging import getLogger, StreamHandler
 
-# Update here and in setup.py
-VERSION = '1.0.0rc5-dev'
+import terrarium
 
 try:
     import boto  # noqa
@@ -20,6 +19,12 @@ try:
     import boto.exception
 except ImportError:
     boto = None  # noqa
+
+# import google cloud storage lib
+try:
+    import gcloud.storage as gcs
+except ImportError:
+    gcs = None
 
 from virtualenv import (  # noqa
     call_subprocess,
@@ -30,7 +35,7 @@ logger = getLogger(__name__)
 
 # http://www.astro.keele.ac.uk/oldusers/rno/Computing/File_magic.html
 MAGIC_NUM = {
-            # magic code, offset
+    # magic code, offset
     'ELF': ('.ELF', 0),
     'GZIP': ('\x1f\x8b', 0),
     'BZIP': ('\x42\x5a', 0),
@@ -39,6 +44,7 @@ MAGIC_NUM = {
 
 
 class Namespace(argparse._AttributeHolder):
+
     def __init__(self):
         super(Namespace, self).__init__()
         self._sensitive_arguments = set()
@@ -100,6 +106,7 @@ def get_type(path):
 
 
 class Terrarium(object):
+
     def __init__(self, args):
         self.args = args
         self._requirements = None
@@ -280,8 +287,12 @@ class Terrarium(object):
         return 0
 
     @staticmethod
-    def replace_all_in_directory(location, old,
-            replace='__VIRTUAL_ENV__', binary=False):
+    def replace_all_in_directory(
+        location,
+        old,
+        replace='__VIRTUAL_ENV__',
+        binary=False,
+    ):
         for name in os.listdir(location):
             full_path = os.path.join(location, name)
             data = None
@@ -401,6 +412,25 @@ class Terrarium(object):
             pass
         return boto.s3.bucket.Bucket(conn, name=self.args.s3_bucket)
 
+    def _get_gcs_bucket(self):
+        if not gcs:
+            return None
+
+        conn = gcs.get_connection(
+            self.args.gcs_project,
+            self.args.gcs_client_email,
+            self.args.gcs_private_key
+        )
+
+        # try to make a new one, or pass if existed
+        try:
+            bucket = conn.create_bucket(self.args.gcs_bucket)
+            bucket.make_public(recursive=True, future=True)
+        except Exception:
+            pass
+
+        return conn.get_bucket(self.args.gcs_bucket)
+
     def download(self, target):
         if self.args.storage_dir:
             remote_archive = os.path.join(
@@ -421,10 +451,14 @@ class Terrarium(object):
                 os.unlink(local_archive)
                 return True
             logger.error('Download archive failed')
+
+        # make remote key for extenal storage system
+        remote_key = self.make_remote_key()
+
+        # store to S3 if boto enabled and arguments set
         if boto and self.args.s3_bucket:
             bucket = self._get_s3_bucket()
             if bucket:
-                remote_key = self.make_remote_key()
                 key = bucket.get_key(remote_key)
                 if key:
                     logger.info(
@@ -434,6 +468,26 @@ class Terrarium(object):
                     )
                     fd, archive = tempfile.mkstemp()
                     key.get_contents_to_filename(archive)
+                    self.extract(archive, target)
+                    os.close(fd)
+                    os.unlink(archive)
+                    return True
+
+        # download from Google Cloud Storage if gcs enabled and arguments set
+        if gcs and self.args.gcs_bucket:
+            bucket = self._get_gcs_bucket()
+            if bucket:
+                # blob is the same concept of S3's object on
+                # Google Cloud Storage
+                blob = bucket.get_key(remote_key)
+                if blob:
+                    logger.info(
+                        'Downloading %s/%s from Google Cloud Storage '
+                        '(this may take time) ...'
+                        % (self.args.gcs_bucket, remote_key)
+                    )
+                    fd, archive = tempfile.mkstemp()
+                    blob.download_to_file(archive)
                     self.extract(archive, target)
                     os.close(fd)
                     os.unlink(archive)
@@ -495,33 +549,65 @@ class Terrarium(object):
             else:
                 logger.info('Retrying S3 upload')
 
+    def upload_to_gcs(self, target):
+        logger.info('Uploading environment to Google Cloud Storage')
+        attempts = 0
+        bucket = self._get_gcs_bucket()
+        if not bucket:
+            return False
+
+        blob = bucket.new_key(self.make_remote_key())
+        archive = self.archive(target)
+        if not archive:
+            logger.error('Archiving failed')
+
+        try:
+            blob.upload_from_filename(archive)
+            logger.debug('upload finished')
+            os.unlink(archive)
+            return True
+        except Exception:
+            attempts = attempts + 1
+            logger.warning('There was an error uploading the file')
+            if attempts > self.args.gcs_max_retries:
+                logger.error(
+                    'Attempted to upload archive to Google Cloud Storage, '
+                    'but failed'
+                )
+                raise
+            else:
+                logger.info('Retrying Google Cloud Storage upload')
+
     def upload(self, target):
         if self.args.storage_dir:
-            self.upload_to_storage_dir(target,
-                    self.args.storage_dir)
+            self.upload_to_storage_dir(
+                target,
+                self.args.storage_dir,
+            )
         if boto and self.args.s3_bucket:
             self.upload_to_s3(target)
+        if gcs and self.args.gcs_bucket:
+            self.upload_to_gcs(target)
 
     def create_bootstrap(self, dest):
         extra_text = (
-            TERRARIUM_BOOTSTRAP_EXTRA_TEXT %
-                {
-                    'REQUIREMENTS': self.requirements,
-                    'VENV_LOGGING': self.args.virtualenv_log_level,
-                    'PIP_LOGGING': self.args.pip_log_level,
-                }
+            TERRARIUM_BOOTSTRAP_EXTRA_TEXT.format(
+                requirements=self.requirements,
+                virtualenv_log_level=self.args.virtualenv_log_level,
+                pip_log_level=self.args.pip_log_level,
+            )
         )
         output = create_bootstrap_script(extra_text)
         with open(dest, 'w') as f:
             f.write(output)
 
 
-TERRARIUM_BOOTSTRAP_EXTRA_TEXT = '''
+TERRARIUM_BOOTSTRAP_EXTRA_TEXT = r'''
 def adjust_options(options, args):
     options.use_setuptools = True
     options.system_site_packages = False
 
-REQUIREMENTS = %(REQUIREMENTS)s
+REQUIREMENTS = {requirements}
 
 # Redefining relative path creation to handle symlinks correctly.
 def make_relative_path(source, dest, dest_is_directory=True):
@@ -548,8 +634,11 @@ def make_relative_path(source, dest, dest_is_directory=True):
     return os.path.sep.join(full_parts)
 
 def after_install(options, base):
+    import os
+    import tempfile
+
     # Debug logging for virtualenv
-    logger.consumers = [(%(VENV_LOGGING)s, sys.stdout)]
+    logger.consumers = [({virtualenv_log_level}, sys.stdout)]
 
     home_dir, lib_dir, inc_dir, bin_dir = path_locations(base)
 
@@ -559,8 +648,11 @@ def after_install(options, base):
     sys.executable = join(os.path.abspath(bin_dir), 'python')
 
     # Create a symlink for pythonM.N
-    pyversion = (sys.version_info[0], sys.version_info[1])
-    pyversion_path = join(bin_dir, 'python%%d.%%d' %% pyversion)
+    pyv_major, pyv_minor = (sys.version_info[0], sys.version_info[1])
+    pyversion_path = join(bin_dir, 'python{{major}}.{{minor}}'.format(
+        major=pyv_major,
+        minor=pyv_minor,
+    ))
     # If virtualenv is run using pythonM.N, that binary will already exist so
     # there's no need to create it
     if not os.path.exists(pyversion_path):
@@ -572,10 +664,9 @@ def after_install(options, base):
 
     import pip
     from pip.commands.install import InstallCommand
-    import shlex
 
     # Debug logging for pip
-    pip.logger.consumers = [(%(PIP_LOGGING)s, sys.stdout)]
+    pip.logger.consumers = [({virtualenv_log_level}, sys.stdout)]
 
     # If we are on a version of pip before 1.2, load version control modules
     # for installing 'editables'
@@ -589,11 +680,16 @@ def after_install(options, base):
         from pip.baseparser import create_main_parser
         main_parser = create_main_parser()
         c = InstallCommand(main_parser)
-    reqs = shlex.split(' '.join(REQUIREMENTS))
-    options, args = c.parser.parse_args(reqs)
+
+    fd, file_path = tempfile.mkstemp()
+    with os.fdopen(fd, 'w') as f:
+        f.write('\n'.join(REQUIREMENTS))
+    options, args = c.parser.parse_args(['-r', file_path])
     options.require_venv = True
     options.ignore_installed = True
     requirementSet = c.run(options, args)
+
+    os.unlink(file_path)
 
     make_environment_relocatable(base)
 '''
@@ -603,12 +699,14 @@ def parse_args():
     sensitive_arguments = [
         's3_access_key',
         's3_secret_key',
+        'gcs_client_email',
+        'gcs_private_key',
     ]
     ap = argparse.ArgumentParser()
     ap.add_argument(
         '-V', '--version',
         action='version',
-        version='%(prog)s ' + VERSION,
+        version='%(prog)s ' + terrarium.__version__,
     )
     ap.add_argument(
         '-v', '--verbose',
@@ -791,6 +889,48 @@ def parse_args():
         ''',
     )
 
+    # gcs relavent arguments
+    ap.add_argument(
+        '--gcs-bucket',
+        default=os.environ.get('GCS_BUCKET', None),
+        help='''
+            Google Cloud Storage bucket name.
+            Defaults to GCS_BUCKET env variable.
+        '''
+    )
+    ap.add_argument(
+        '--gcs-project',
+        default=os.environ.get('GCS_PROJECT', None),
+        help='''
+            Google Cloud Storage project.
+            Defaults to GCS_PROJECT env variable.
+        '''
+    )
+    ap.add_argument(
+        '--gcs-client-email',
+        default=os.environ.get('GCS_CLIENT_EMAIL', None),
+        help='''
+            Google Cloud Storage client email.
+            Defaults to GCS_CLIENT_EMAIL env variable.
+        '''
+    )
+    ap.add_argument(
+        '--gcs-private-key',
+        default=os.environ.get('GCS_PRIVATE_KEY', None),
+        help='''
+            Google Cloud Storage private key.
+            Defaults to GCS_PRIVATE_KEY env variable.
+        '''
+    )
+    ap.add_argument(
+        '--gcs-max-retries',
+        default=os.environ.get('GCS_MAX_RETRIES', 3),
+        help='''
+            Number of times to attempt a GCS operation before giving up.
+            Default is 3.
+        '''
+    )
+
     subparsers = ap.add_subparsers(
         title='Basic Commands',
         dest='command',
@@ -831,7 +971,14 @@ def parse_args():
             'which does not appear to be the case'
         )
 
+    if not gcs and args.gcs_bucket is not None:
+        ap.error(
+            '--gcs-bucket requires that you have gcloud installed, '
+            'which does not appear to be the case'
+        )
+
     return args
+
 
 def main():
     args = parse_args()
