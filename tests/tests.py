@@ -12,6 +12,7 @@ import sys
 
 
 class TerrariumTester(unittest.TestCase):
+
     def setUp(self):
         _, requirements = tempfile.mkstemp(prefix='test_terrarium_req-')
         target = tempfile.mkdtemp(prefix='test_terrarium_target-')
@@ -210,6 +211,7 @@ class TerrariumTester(unittest.TestCase):
 
 
 class TestTerrarium(TerrariumTester):
+
     def test_no_params(self):
         output, return_code = self._terrarium()
         self.assertEqual(return_code, 2)
@@ -255,6 +257,25 @@ class TestTerrarium(TerrariumTester):
         expected = ['test_requirement']
         self.assertEqual(actual, expected)
 
+    def test_install_requirements_with_dependency(self):
+        """ This test involves a requirements file with two items,
+            test_requirement and foo_requirement. foo_requirement
+            has test_requirement as a dependency. We check that,
+            if test_requirement comes first in the requirements,
+            the install of foo_requirement will be successful.
+        """
+        self._add_requirements(
+            self._get_path('fixtures', 'test_requirement'),
+            self._get_path('fixtures', 'foo_requirement'),
+        )
+        self.assertInstall()
+        actual = self._can_import_requirements(
+            'test_requirement',
+            'foo_requirement',
+        )
+        expected = ['test_requirement', 'foo_requirement']
+        self.assertEqual(actual, expected)
+
     def test_install_with_requirement_comments(self):
         # Verify that a requirement file with comment lines can be used.
         self._add_requirements(
@@ -266,6 +287,20 @@ class TestTerrarium(TerrariumTester):
             'test_requirement',
         )
         expected = ['test_requirement']
+        self.assertEqual(actual, expected)
+
+    def test_install_editable_with_hash_egg_name(self):
+        # Verify that a requirement file with a hash egg name can be used and
+        # is not confused with a comment
+        # If the #egg=foobar is removed, pip will fail
+        self._add_requirements(
+            '-e git+git://github.com/PolicyStat/terrarium.git#egg=foobar',
+        )
+        self.assertInstall()
+        actual = self._can_import_requirements(
+            'terrarium',
+        )
+        expected = ['terrarium']
         self.assertEqual(actual, expected)
 
     def test_hash_default_empty_requirements(self):
@@ -509,6 +544,19 @@ class TestTerrarium(TerrariumTester):
         )
         self.assertTrue(
             'error: --s3-bucket requires that you have boto installed, '
+            'which does not appear to be the case'
+            in output[1]
+        )
+
+    def test_gcs_required_to_use_gcs_bucket(self):
+        self._add_test_requirement()
+
+        output = self.assertInstall(
+            return_code=2,
+            gcs_bucket='bucket',
+        )
+        self.assertTrue(
+            'error: --gcs-bucket requires that you have gcloud installed, '
             'which does not appear to be the case'
             in output[1]
         )
